@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+import csv
+import json
+import shutil
+from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT / "data"
+MODEL_DIR = ROOT / "models"
+REPORT_DIR = ROOT / "reports"
+DOWNLOADS_RESUME = Path.home() / "Downloads" / "Resume.csv"
+
+CAREER_SEEDS = {
+    "AI Engineer": ["python", "machine learning", "llm", "tensorflow", "nlp", "rag", "api", "deployment"],
+    "Data Scientist": ["python", "sql", "statistics", "pandas", "machine learning", "visualization", "experiments"],
+    "ML Engineer": ["python", "tensorflow", "mlops", "docker", "model serving", "feature engineering", "monitoring"],
+    "Full Stack Developer": ["react", "javascript", "flask", "api", "database", "auth", "testing", "deployment"],
+    "Cloud Engineer": ["aws", "linux", "docker", "kubernetes", "terraform", "ci/cd", "observability"],
+    "Cybersecurity Analyst": ["security", "networking", "linux", "siem", "incident response", "risk", "cloud security"],
+    "Data Analyst": ["sql", "excel", "tableau", "power bi", "dashboards", "statistics", "business analysis"],
+}
+
+
+def build_dataset(rows_per_career: int = 750) -> Path:
+    DATA_DIR.mkdir(exist_ok=True)
+    real_dataset = DATA_DIR / "real_resume_training_dataset.csv"
+    if real_dataset.exists():
+        return real_dataset
+    if DOWNLOADS_RESUME.exists():
+        return normalize_resume_csv(DOWNLOADS_RESUME, real_dataset)
+    path = DATA_DIR / "career_training_dataset.csv"
+    rng = np.random.default_rng(42)
+    with path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=["skills", "interests", "experience_level", "resume_text", "career"])
+        writer.writeheader()
+        for career, skills in CAREER_SEEDS.items():
+            for _ in range(rows_per_career):
+                selected = rng.choice(skills, size=int(rng.integers(3, min(7, len(skills)) + 1)), replace=False)
+                interests = rng.choice(["ai", "analytics", "cloud", "security", "product", "automation", "systems"], size=2, replace=False)
+                level = rng.choice(["Beginner", "Intermediate", "Advanced"], p=[0.34, 0.46, 0.2])
+                resume = f"Built projects using {', '.join(selected)} with focus on {career.lower()} outcomes and measurable impact."
+                writer.writerow(
+                    {
+                        "skills": ", ".join(selected),
+                        "interests": ", ".join(interests),
+                        "experience_level": level,
+                        "resume_text": resume,
+                        "career": career,
+                    }
+                )
+    return path
+
+
+def normalize_resume_csv(source: Path, destination: Path) -> Path:
+    df = pd.read_csv(source)
+    columns = {column.lower(): column for column in df.columns}
+    text_column = columns.get("resume_str") or columns.get("resume") or columns.get("resume_text") or columns.get("text")
+    label_column = columns.get("category") or columns.get("career") or columns.get("label") or columns.get("job_title")
+    if not text_column or not label_column:
+        raise ValueError(f"Could not map resume text/category columns from {list(df.columns)}")
+
+    normalized = pd.DataFrame(
+        {
+            "skills": "",
+            "interests": "",
+            "experience_level": "Unknown",
+            "resume_text": df[text_column].fillna("").astype(str),
+            "career": df[label_column].fillna("Unknown").astype(str),
+        }
+    )
+    normalized = normalized[normalized["resume_text"].str.len() > 40]
+    normalized.to_csv(destination, index=False)
+    shutil.copyfile(source, DATA_DIR / "source_resume_dataset.csv")
+    return destination
+
+
+def train() -> dict[str, object]:
+    MODEL_DIR.mkdir(exist_ok=True)
+    REPORT_DIR.mkdir(exist_ok=True)
+    dataset = build_dataset()
+    rows = list(csv.DictReader(dataset.open(encoding="utf-8")))
+    x = [f"{row['skills']} {row['interests']} {row['experience_level']} {row['resume_text']}" for row in rows]
+    y = [row["career"] for row in rows]
+    x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=42, stratify=y)
+    model = Pipeline(
+        [
+            ("tfidf", TfidfVectorizer(ngram_range=(1, 2), min_df=2)),
+            ("classifier", RandomForestClassifier(n_estimators=160, random_state=42, class_weight="balanced")),
+        ]
+    )
+    model.fit(x_train, y_train)
+    predictions = model.predict(x_test)
+    accuracy = accuracy_score(y_test, predictions)
+    f1 = f1_score(y_test, predictions, average="weighted")
+    joblib.dump(model, MODEL_DIR / "career_recommender.joblib")
+    report = {
+        "dataset": str(dataset.relative_to(ROOT)),
+        "dataset_rows": len(rows),
+        "model": "TF-IDF + RandomForest baseline; TensorFlow/Keras export available when tensorflow is installed",
+        "accuracy": round(float(accuracy), 4),
+        "weighted_f1": round(float(f1), 4),
+        "classification_report": classification_report(y_test, predictions, output_dict=True),
+    }
+    (REPORT_DIR / "evaluation_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    try_export_tensorflow_placeholder(x_train, y_train)
+    return report
+
+
+def try_export_tensorflow_placeholder(x_train: list[str], y_train: list[str]) -> None:
+    try:
+        import tensorflow as tf  # type: ignore
+        from sklearn.preprocessing import LabelEncoder
+
+        encoder = LabelEncoder()
+        labels = encoder.fit_transform(y_train)
+        vectorizer = TfidfVectorizer(max_features=512)
+        features = vectorizer.fit_transform(x_train).toarray()
+        model = tf.keras.Sequential(
+            [
+                tf.keras.layers.Input(shape=(features.shape[1],)),
+                tf.keras.layers.Dense(128, activation="relu"),
+                tf.keras.layers.Dropout(0.25),
+                tf.keras.layers.Dense(len(encoder.classes_), activation="softmax"),
+            ]
+        )
+        model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+        model.fit(features, labels, epochs=6, batch_size=32, verbose=0)
+        model.save(MODEL_DIR / "career_recommender.keras")
+        joblib.dump(vectorizer, MODEL_DIR / "keras_vectorizer.joblib")
+        joblib.dump(encoder, MODEL_DIR / "keras_label_encoder.joblib")
+    except Exception:
+        (MODEL_DIR / "README.md").write_text(
+            "TensorFlow is not installed in this environment. Run `pip install -r requirements.txt` and then `python training/train_models.py` to export `career_recommender.keras`.\n",
+            encoding="utf-8",
+        )
+
+
+if __name__ == "__main__":
+    print(json.dumps(train(), indent=2))
