@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from dataclasses import dataclass
@@ -11,6 +11,7 @@ import joblib
 ROOT = Path(__file__).resolve().parent
 MODEL_PATH = ROOT / "models" / "career_recommender.joblib"
 REPORT_PATH = ROOT / "reports" / "evaluation_report.json"
+_MODEL_CACHE = None
 
 
 CAREER_LABELS = [
@@ -84,10 +85,14 @@ def dataset_rows() -> int:
 
 
 def trained_model():
+    global _MODEL_CACHE
+    if _MODEL_CACHE is not None:
+        return _MODEL_CACHE
     if not MODEL_PATH.exists():
         return None
     try:
-        return joblib.load(MODEL_PATH)
+        _MODEL_CACHE = joblib.load(MODEL_PATH)
+        return _MODEL_CACHE
     except Exception:
         return None
 
@@ -204,3 +209,4 @@ def report_metric(key: str, fallback: str) -> str:
         except Exception:
             return fallback
     return fallback
+

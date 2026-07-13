@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -135,6 +135,16 @@ def init_db() -> None:
         conn.execute("ALTER TABLE sessions ADD COLUMN expires_at TEXT")
     if "revoked_at" not in session_columns:
         conn.execute("ALTER TABLE sessions ADD COLUMN revoked_at TEXT")
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_profiles_user_created ON profiles(user_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_profile_created ON agent_runs(profile_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_resumes_profile_created ON resumes(profile_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_interviews_profile_created ON interviews(profile_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_chats_profile_created ON chats(profile_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_sessions_token_expiry ON sessions(token, expires_at, revoked_at);
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -764,3 +774,4 @@ def admin_stats():
 if __name__ == "__main__":
     init_db()
     app.run(debug=True)
+
