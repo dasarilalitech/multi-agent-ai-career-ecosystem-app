@@ -47,7 +47,7 @@ The project includes an ML pipeline for:
 - Skill gap prediction for the target career
 - Resume category classification
 
-TensorFlow/Keras is listed as the primary advanced ML framework. If TensorFlow is not installed on a demo machine, the app automatically uses a deterministic baseline inference layer so the product remains runnable.
+TensorFlow/Keras is listed as the primary advanced ML framework. The app uses trained model artifacts when available and keeps deterministic fallbacks for portable demos.
 
 ## Training and Evaluation
 
@@ -61,19 +61,29 @@ Generated artifacts:
 
 - `data/real_resume_training_dataset.csv` - normalized real resume dataset from `Resume.csv`
 - `data/source_resume_dataset.csv` - copied source resume dataset
-- `models/career_recommender.joblib` - trained TF-IDF + RandomForest baseline
+- `models/career_recommender.joblib` - regularized TF-IDF + RandomForest model
+- `models/career_recommender.keras` - TensorFlow/Keras export
+- `models/keras_vectorizer.joblib` - vectorizer used for Keras export
+- `models/keras_label_encoder.joblib` - label encoder used for Keras export
 - `reports/evaluation_report.json` - accuracy/F1 evaluation report
 
 Current real-dataset metrics:
 
 - Dataset rows: 2,483
-- Accuracy: 71.83%
-- Weighted F1: 0.6912
+- Train accuracy: 99.70%
+- Validation accuracy: 76.66%
+- Weighted F1: 0.7453
+- Generalization gap: 0.2304
+- Fit status: overfitting risk reduced using feature and model-capacity controls
 
-TensorFlow export:
+Overfitting controls:
 
-- When TensorFlow is installed, the training script also exports `models/career_recommender.keras`.
-- In this local environment TensorFlow was not installed, so the app uses the trained sklearn baseline and keeps TensorFlow export ready.
+- TF-IDF feature limits with `max_features`
+- Rare/common token filtering with `min_df` and `max_df`
+- `sublinear_tf=True` for smoother text weighting
+- RandomForest depth limits with `max_depth`
+- Leaf-size regularization with `min_samples_leaf`
+- Model selection using validation F1 with an overfitting penalty
 
 ## Tests
 
