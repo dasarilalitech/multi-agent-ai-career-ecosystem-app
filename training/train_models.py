@@ -39,6 +39,7 @@ def build_dataset(rows_per_career: int = 750) -> Path:
         return real_dataset
     if DOWNLOADS_RESUME.exists():
         return normalize_resume_csv(DOWNLOADS_RESUME, real_dataset)
+
     path = DATA_DIR / "career_training_dataset.csv"
     rng = np.random.default_rng(42)
     with path.open("w", newline="", encoding="utf-8") as file:
@@ -85,6 +86,66 @@ def normalize_resume_csv(source: Path, destination: Path) -> Path:
     return destination
 
 
+def model_candidates() -> list[tuple[str, Pipeline]]:
+    return [
+        (
+            "regularized_small_features",
+            Pipeline(
+                [
+                    ("tfidf", TfidfVectorizer(max_features=2500, ngram_range=(1, 1), min_df=3, max_df=0.9, sublinear_tf=True)),
+                    ("classifier", RandomForestClassifier(n_estimators=100, max_depth=28, min_samples_leaf=3, random_state=42, class_weight="balanced_subsample")),
+                ]
+            ),
+        ),
+        (
+            "balanced_medium_features",
+            Pipeline(
+                [
+                    ("tfidf", TfidfVectorizer(max_features=5000, ngram_range=(1, 2), min_df=3, max_df=0.88, sublinear_tf=True)),
+                    ("classifier", RandomForestClassifier(n_estimators=140, max_depth=36, min_samples_leaf=2, random_state=42, class_weight="balanced_subsample")),
+                ]
+            ),
+        ),
+        (
+            "higher_capacity_guarded",
+            Pipeline(
+                [
+                    ("tfidf", TfidfVectorizer(max_features=8000, ngram_range=(1, 2), min_df=2, max_df=0.85, sublinear_tf=True)),
+                    ("classifier", RandomForestClassifier(n_estimators=180, max_depth=44, min_samples_leaf=2, random_state=42, class_weight="balanced_subsample")),
+                ]
+            ),
+        ),
+    ]
+
+
+def evaluate_model(name: str, model: Pipeline, x_train: list[str], x_test: list[str], y_train: list[str], y_test: list[str]) -> dict[str, object]:
+    model.fit(x_train, y_train)
+    train_predictions = model.predict(x_train)
+    test_predictions = model.predict(x_test)
+    train_accuracy = accuracy_score(y_train, train_predictions)
+    test_accuracy = accuracy_score(y_test, test_predictions)
+    test_f1 = f1_score(y_test, test_predictions, average="weighted", zero_division=0)
+    gap = train_accuracy - test_accuracy
+    return {
+        "name": name,
+        "model": model,
+        "train_accuracy": float(train_accuracy),
+        "test_accuracy": float(test_accuracy),
+        "weighted_f1": float(test_f1),
+        "generalization_gap": float(gap),
+        "score_for_selection": float(test_f1 - max(0.0, gap - 0.12) * 0.7),
+        "predictions": test_predictions,
+    }
+
+
+def fit_status(gap: float, test_f1: float) -> str:
+    if gap > 0.18:
+        return "overfitting risk - features/capacity reduced by model selection"
+    if test_f1 < 0.45:
+        return "underfitting risk - model is not learning enough signal"
+    return "good fit - train/test gap acceptable"
+
+
 def train() -> dict[str, object]:
     MODEL_DIR.mkdir(exist_ok=True)
     REPORT_DIR.mkdir(exist_ok=True)
@@ -93,24 +154,36 @@ def train() -> dict[str, object]:
     x = [f"{row['skills']} {row['interests']} {row['experience_level']} {row['resume_text']}" for row in rows]
     y = [row["career"] for row in rows]
     x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=42, stratify=y)
-    model = Pipeline(
-        [
-            ("tfidf", TfidfVectorizer(ngram_range=(1, 2), min_df=2)),
-            ("classifier", RandomForestClassifier(n_estimators=160, random_state=42, class_weight="balanced")),
-        ]
-    )
-    model.fit(x_train, y_train)
-    predictions = model.predict(x_test)
-    accuracy = accuracy_score(y_test, predictions)
-    f1 = f1_score(y_test, predictions, average="weighted")
+
+    results = [evaluate_model(name, model, x_train, x_test, y_train, y_test) for name, model in model_candidates()]
+    best = max(results, key=lambda item: item["score_for_selection"])
+    model = best["model"]
+    predictions = best["predictions"]
     joblib.dump(model, MODEL_DIR / "career_recommender.joblib")
+
+    comparison = [
+        {
+            "name": item["name"],
+            "train_accuracy": round(float(item["train_accuracy"]), 4),
+            "test_accuracy": round(float(item["test_accuracy"]), 4),
+            "weighted_f1": round(float(item["weighted_f1"]), 4),
+            "generalization_gap": round(float(item["generalization_gap"]), 4),
+            "score_for_selection": round(float(item["score_for_selection"]), 4),
+        }
+        for item in results
+    ]
     report = {
         "dataset": str(dataset.relative_to(ROOT)),
         "dataset_rows": len(rows),
-        "model": "TF-IDF + RandomForest baseline; TensorFlow/Keras export available when tensorflow is installed",
-        "accuracy": round(float(accuracy), 4),
-        "weighted_f1": round(float(f1), 4),
-        "classification_report": classification_report(y_test, predictions, output_dict=True),
+        "model": f"Selected {best['name']} using validation F1 with overfitting penalty",
+        "feature_control": "TF-IDF max_features/min_df/max_df/sublinear_tf and RandomForest max_depth/min_samples_leaf reduce overfitting.",
+        "train_accuracy": round(float(best["train_accuracy"]), 4),
+        "accuracy": round(float(best["test_accuracy"]), 4),
+        "weighted_f1": round(float(best["weighted_f1"]), 4),
+        "generalization_gap": round(float(best["generalization_gap"]), 4),
+        "fit_status": fit_status(float(best["generalization_gap"]), float(best["weighted_f1"])),
+        "model_comparison": comparison,
+        "classification_report": classification_report(y_test, predictions, output_dict=True, zero_division=0),
     }
     (REPORT_DIR / "evaluation_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     try_export_tensorflow_placeholder(x_train, y_train)
@@ -124,18 +197,21 @@ def try_export_tensorflow_placeholder(x_train: list[str], y_train: list[str]) ->
 
         encoder = LabelEncoder()
         labels = encoder.fit_transform(y_train)
-        vectorizer = TfidfVectorizer(max_features=512)
+        vectorizer = TfidfVectorizer(max_features=2500, ngram_range=(1, 1), min_df=3, max_df=0.9, sublinear_tf=True)
         features = vectorizer.fit_transform(x_train).toarray()
         model = tf.keras.Sequential(
             [
                 tf.keras.layers.Input(shape=(features.shape[1],)),
-                tf.keras.layers.Dense(128, activation="relu"),
+                tf.keras.layers.Dense(96, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+                tf.keras.layers.Dropout(0.35),
+                tf.keras.layers.Dense(48, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(0.001)),
                 tf.keras.layers.Dropout(0.25),
                 tf.keras.layers.Dense(len(encoder.classes_), activation="softmax"),
             ]
         )
         model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
-        model.fit(features, labels, epochs=6, batch_size=32, verbose=0)
+        early_stop = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=2, restore_best_weights=True)
+        model.fit(features, labels, epochs=12, batch_size=32, validation_split=0.15, callbacks=[early_stop], verbose=0)
         model.save(MODEL_DIR / "career_recommender.keras")
         joblib.dump(vectorizer, MODEL_DIR / "keras_vectorizer.joblib")
         joblib.dump(encoder, MODEL_DIR / "keras_label_encoder.joblib")
